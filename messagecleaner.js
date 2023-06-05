@@ -10,13 +10,31 @@ const client = new Client({
 });
 
 const channelId = 'CHANNEL_ID';
-const deleteDelay = 0; // Delete delay in milliseconds
+let deleteDelay = 0; // Delete delay in milliseconds
 const searchInterval = 30; // Number of deletions before fetching new messages
-const rateLimitDelay = 3000; // Delay in milliseconds for rate-limited requests
+const messagesToDelete = 600; // Number of messages to delete before triggering cooldown
+const cooldown = 2500; // Cooldown period in milliseconds
+const baseDeleteDelay = 55; // Base delete delay in milliseconds
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
   deleteMessages();
+});
+
+client.on('rateLimit', (rateLimitInfo) => {
+  console.log(colors.red(`Rate Limited by the API. Retry after ${rateLimitInfo.timeout}ms`));
+  if (deleteDelay === baseDeleteDelay) {
+    deleteDelay = cooldown;
+    console.log(colors.yellow(`Increasing delete delay to ${deleteDelay}ms`));
+  } else {
+    const newDeleteDelay = Math.max(deleteDelay - 100, baseDeleteDelay);
+    if (newDeleteDelay !== deleteDelay) {
+      deleteDelay = newDeleteDelay;
+      console.log(colors.yellow(`Decreasing delete delay to ${deleteDelay}ms`));
+    } else if (deleteDelay > baseDeleteDelay) {
+      console.log(colors.yellow(`Delete delay already at minimum. Keeping it at ${deleteDelay}ms`));
+    }
+  }
 });
 
 async function deleteMessages() {
@@ -29,11 +47,13 @@ async function deleteMessages() {
   let deletedCount = 0;
   let searchedCount = 0;
   let startTime = Date.now();
+  let deleteCounter = 0;
+  let isCooldown = false;
 
   while (true) {
     try {
       if (searchedCount === searchInterval) {
-        console.log(colors.yellow('Fetching next 30 messages...'));
+        console.log(colors.green('Fetching next 30 messages...'));
         searchedCount = 0;
       }
 
@@ -43,17 +63,36 @@ async function deleteMessages() {
       }
 
       for (const [messageId, message] of fetchedMessages) {
-        console.log(`Deleted message with ID ${messageId}. Delete delay: ${deleteDelay}ms`);
-        await message.delete();
-        deletedCount++;
-        searchedCount++;
-        await delay(deleteDelay);
+        if (!isCooldown) {
+          console.log(`Deleted message with ID ${messageId}. Delete delay: ${deleteDelay}ms`);
+          await message.delete();
+          deletedCount++;
+          searchedCount++;
+          deleteCounter++;
+
+          if (deleteCounter === messagesToDelete) {
+            isCooldown = true;
+            console.log(colors.yellow(`Cooldown activated. Waiting for ${cooldown / 1000} seconds...`));
+            await delay(cooldown);
+            isCooldown = false;
+            deleteCounter = 0;
+          } else if (deleteDelay > baseDeleteDelay) {
+            const newDeleteDelay = Math.max(deleteDelay - 100, baseDeleteDelay);
+            if (newDeleteDelay !== deleteDelay) {
+              deleteDelay = newDeleteDelay;
+              console.log(colors.yellow(`Decreasing delete delay to ${deleteDelay}ms`));
+            } else if (deleteDelay > baseDeleteDelay) {
+              console.log(colors.yellow(`Delete delay already at minimum. Keeping it at ${deleteDelay}ms`));
+            }
+          }
+
+          await delay(deleteDelay);
+        } else {
+          console.log(colors.yellow('Cooldown active. Skipping message deletion.'));
+        }
       }
     } catch (error) {
-      if (error.code === 429) {
-        console.log(colors.yellow('[Rate Limited] Being rate limited by the API.'));
-        await delay(rateLimitDelay);
-      } else if (error.code === 403) {
+      if (error.code === 403) {
         console.log(colors.red('[Error] Invalid permissions to delete messages in the channel.'));
         break;
       } else {
